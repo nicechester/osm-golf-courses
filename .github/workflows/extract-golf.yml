@@ -38,8 +38,12 @@ jobs:
             mexico
           )
           
+          total=${#regions[@]}
+          current=0
+          
           for region in "${regions[@]}"; do
-            echo "=== Downloading: $region ==="
+            current=$((current + 1))
+            echo "=== [$current/$total] Downloading: $region ==="
             
             if [[ "$region" == "mexico" ]]; then
               url="https://download.geofabrik.de/north-america/mexico-latest.osm.pbf"
