@@ -130,7 +130,7 @@ jobs:
             
             # Extract golf courses
             osmium tags-filter raw/region.osm.pbf \
-              nwr/leisure=golf_course nwr/golf=* \
+              nwr/leisure=golf_course nwr/golf=hole nwr/golf=fairway nwr/golf=green nwr/golf=bunker nwr/golf=rough \
               -o raw/golf.osm.pbf --overwrite
             
             # Export to GeoJSON
