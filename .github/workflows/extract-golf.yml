@@ -134,7 +134,7 @@ jobs:
               -o raw/golf.osm.pbf --overwrite
             
             # Export to GeoJSON
-            osmium export raw/golf.osm.pbf -o "raw/${chunk}.geojson" --overwrite
+            osmium export raw/golf.osm.pbf -o "raw/${chunk}.geojson" --add-unique-id=type_id --overwrite
             
             # Extract course info for index (leisure=golf_course only, with name)
             jq -c --arg chunk "$chunk" --arg country "$country" --arg state "$state" '
@@ -146,14 +146,17 @@ jobs:
                   state: $state,
                   country: $country,
                   chunk: $chunk,
-                  osmId: (.id // .properties["@id"] // "" | tostring | gsub("[^0-9]"; "") | tonumber),
-                  osmType: (if .geometry.type == "Point" then "node" elif .geometry.type == "Polygon" then "way" else "relation" end),
+                  osmId: .id,
                   lat: (if .geometry.type == "Point" then .geometry.coordinates[1] 
+                        elif .geometry.type == "LineString" then (.geometry.coordinates | map(.[1]) | add / length)
                         elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[1]) | add / length)
-                        else (.geometry.coordinates[0][0] | map(.[1]) | add / length) end),
+                        elif .geometry.type == "MultiPolygon" then (.geometry.coordinates[0][0] | map(.[1]) | add / length)
+                        else 0 end),
                   lon: (if .geometry.type == "Point" then .geometry.coordinates[0]
+                        elif .geometry.type == "LineString" then (.geometry.coordinates | map(.[0]) | add / length)
                         elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[0]) | add / length)
-                        else (.geometry.coordinates[0][0] | map(.[0]) | add / length) end)
+                        elif .geometry.type == "MultiPolygon" then (.geometry.coordinates[0][0] | map(.[0]) | add / length)
+                        else 0 end)
                 }
             ' "raw/${chunk}.geojson" > "raw/${chunk}_index.json" 2>/dev/null || true
             
