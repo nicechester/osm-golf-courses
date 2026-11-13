@@ -17,10 +17,10 @@ jobs:
 
       - name: Extract North America
         run: |
-          curl -L "https://download.geofabrik.de/north-america-latest.osm.pbf" | \
-            osmium tags-filter -F pbf - nwr/leisure=golf_course nwr/golf=* -o na-golf.osm.pbf
+          curl -L -o na.osm.pbf "https://download.geofabrik.de/north-america-latest.osm.pbf"
+          osmium tags-filter na.osm.pbf nwr/leisure=golf_course nwr/golf=* -o na-golf.osm.pbf
           osmium export na-golf.osm.pbf -o golf-courses-na.geojson
-          rm na-golf.osm.pbf
+          rm na.osm.pbf na-golf.osm.pbf
 
       - name: Commit
         run: |
