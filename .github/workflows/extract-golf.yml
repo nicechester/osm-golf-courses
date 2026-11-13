@@ -122,21 +122,21 @@ jobs:
         run: |
           TAG="v$(date +%Y%m%d)"
           
-          mkdir -p indexes
+          mkdir -p indexes tmp_data
           
           # Download all geojson files and build index
           gh release download "$TAG" --pattern "*.geojson.gz" --dir tmp_data || true
           
-          # Build master index
-          echo "[" > indexes/index.json
-          first=true
+          # Build master index - collect all courses into one array
+          echo '[]' > indexes/index.json
           
           for f in tmp_data/*.geojson.gz; do
             [[ -f "$f" ]] || continue
             name=$(basename "$f" .geojson.gz)
+            echo "Processing index for $name..."
             
-            # Extract course list from geojson
-            gunzip -c "$f" | jq -c --arg file "${name}.geojson.gz" '.features[] | select(.properties.leisure == "golf_course" and .properties.name != null) | {
+            # Extract courses and merge into index
+            gunzip -c "$f" | jq -c --arg file "${name}.geojson.gz" '[.features[] | select(.properties.leisure == "golf_course" and .properties.name != null) | {
               name: .properties.name,
               city: (.properties["addr:city"] // ""),
               osmId: .id,
@@ -147,20 +147,15 @@ jobs:
               lon: (if .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[0]) | add / length)
                     elif .geometry.type == "MultiPolygon" then (.geometry.coordinates | flatten(2) | map(.[0]) | add / length)
                     else null end)
-            }' | while read -r entry; do
-              if [[ "$first" == "true" ]]; then
-                first=false
-              else
-                echo ","
-              fi
-              echo "$entry"
-            done >> indexes/index.json
+            }]' > tmp_region.json
+            
+            # Merge with existing index
+            jq -s 'add' indexes/index.json tmp_region.json > indexes/index_new.json
+            mv indexes/index_new.json indexes/index.json
           done
           
-          echo "]" >> indexes/index.json
-          
-          # Sort and clean up index
-          jq -s 'add | sort_by(.name)' indexes/index.json > indexes/index_sorted.json
+          # Sort index
+          jq 'sort_by(.name)' indexes/index.json > indexes/index_sorted.json
           mv indexes/index_sorted.json indexes/index.json
           
           echo "Total courses: $(jq length indexes/index.json)"
