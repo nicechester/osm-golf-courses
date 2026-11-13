@@ -1,0 +1,31 @@
+name: Extract Golf Courses
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install osmium
+        run: sudo apt-get install -y osmium-tool
+
+      - name: Extract North America
+        run: |
+          curl -L "https://download.geofabrik.de/north-america-latest.osm.pbf" | \
+            osmium tags-filter - nwr/leisure=golf_course nwr/golf=* -o na-golf.osm.pbf
+          osmium export na-golf.osm.pbf -o golf-courses-na.geojson
+          rm na-golf.osm.pbf
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add *.geojson
+          git diff --staged --quiet || git commit -m "Update golf courses $(date +%Y-%m-%d)"
+          git push
