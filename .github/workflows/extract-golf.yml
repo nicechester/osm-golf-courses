@@ -181,11 +181,12 @@ jobs:
           done
           
           # Build state index (only Polygon/MultiPolygon)
-          jq -c '[.features[] | select(.properties.leisure == "golf_course" and .properties.name != null and (.geometry.type == "Polygon" or .geometry.type == "MultiPolygon")) | {
+          file_prefix="${continent}_${country}_${state}_"
+          jq -c --arg prefix "$file_prefix" '[.features[] | select(.properties.leisure == "golf_course" and .properties.name != null and (.geometry.type == "Polygon" or .geometry.type == "MultiPolygon")) | {
             name: .properties.name,
             city: (.properties["addr:city"] // ""),
             osmId: .id,
-            file: ((.properties.name | ascii_downcase | gsub("[^a-z0-9]"; "-") | gsub("--+"; "-") | gsub("^-"; "") | gsub("-$"; "")) + "-" + .id + ".geojson.gz"),
+            file: ($prefix + (.properties.name | ascii_downcase | gsub("[^a-z0-9]"; "-") | gsub("--+"; "-") | gsub("^-"; "") | gsub("-$"; "")) + "-" + .id + ".geojson.gz"),
             lat: (if .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[1]) | add / length)
                   else (.geometry.coordinates | flatten(2) | map(.[1]) | add / length) end),
             lon: (if .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[0]) | add / length)
