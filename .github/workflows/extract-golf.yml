@@ -2,7 +2,7 @@ name: Extract Golf Courses
 
 on:
   schedule:
-    - cron: '0 0 * * 0'  # Weekly
+    - cron: '0 0 * * 0'
   workflow_dispatch:
 
 permissions:
@@ -22,37 +22,35 @@ jobs:
           sudo apt-get install -y osmium-tool jq
 
       - name: Create directories
-        run: mkdir -p chunks raw
+        run: mkdir -p raw courses
 
       - name: Extract golf courses from each region
         run: |
-          echo "[]" > all_courses.json
-          
           while IFS= read -r region; do
-            region=$(echo "$region" | xargs)  # trim whitespace
+            region=$(echo "$region" | xargs)
             [ -z "$region" ] && continue
             
-            # Determine URL and chunk name
+            # Determine URL and paths
             if [[ "$region" == "mexico" ]]; then
               url="https://download.geofabrik.de/north-america/mexico-latest.osm.pbf"
-              chunk="mx-mexico"
-              country="MX"
-              state="Mexico"
+              continent="north-america"
+              country="mx"
+              state="mexico"
             elif [[ "$region" == us/* ]]; then
               state_slug="${region#us/}"
               url="https://download.geofabrik.de/north-america/us/${state_slug}-latest.osm.pbf"
-              chunk="us-${state_slug}"
-              country="US"
-              state=$(echo "$state_slug" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+              continent="north-america"
+              country="us"
+              state="$state_slug"
             elif [[ "$region" == canada/* ]]; then
               prov_slug="${region#canada/}"
               url="https://download.geofabrik.de/north-america/canada/${prov_slug}-latest.osm.pbf"
-              chunk="ca-${prov_slug}"
-              country="CA"
-              state=$(echo "$prov_slug" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+              continent="north-america"
+              country="ca"
+              state="$prov_slug"
             fi
             
-            echo "=== Processing $chunk ==="
+            echo "=== Processing $continent/$country/$state ==="
             
             # Download
             curl -L -o raw/region.osm.pbf "$url" || { echo "Failed to download $region"; continue; }
@@ -62,73 +60,122 @@ jobs:
               nwr/leisure=golf_course nwr/golf=hole nwr/golf=fairway nwr/golf=green nwr/golf=bunker nwr/golf=rough \
               -o raw/golf.osm.pbf --overwrite
             
-            # Export to GeoJSON
-            osmium export raw/golf.osm.pbf -o "raw/${chunk}.geojson" --add-unique-id=type_id --overwrite
+            # Export to GeoJSON with IDs
+            osmium export raw/golf.osm.pbf -o raw/all.geojson --add-unique-id=type_id --overwrite
             
-            # Extract course info for index (leisure=golf_course only, with name)
-            jq -c --arg chunk "$chunk" --arg country "$country" --arg state "$state" '
-              .features[]
-              | select(.properties.leisure == "golf_course" and .properties.name != null)
-              | {
-                  name: .properties.name,
-                  city: (.properties["addr:city"] // ""),
-                  state: $state,
-                  country: $country,
-                  chunk: $chunk,
-                  osmId: .id,
-                  lat: (if .geometry.type == "Point" then .geometry.coordinates[1] 
-                        elif .geometry.type == "LineString" then (.geometry.coordinates | map(.[1]) | add / length)
-                        elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[1]) | add / length)
-                        elif .geometry.type == "MultiPolygon" then (.geometry.coordinates[0][0] | map(.[1]) | add / length)
-                        else 0 end),
-                  lon: (if .geometry.type == "Point" then .geometry.coordinates[0]
-                        elif .geometry.type == "LineString" then (.geometry.coordinates | map(.[0]) | add / length)
-                        elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[0]) | add / length)
-                        elif .geometry.type == "MultiPolygon" then (.geometry.coordinates[0][0] | map(.[0]) | add / length)
-                        else 0 end)
-                }
-            ' "raw/${chunk}.geojson" > "raw/${chunk}_index.json" 2>/dev/null || true
+            # Create directory structure
+            mkdir -p "courses/$continent/$country/$state"
             
-            # Append to all_courses
-            if [ -s "raw/${chunk}_index.json" ]; then
-              jq -s '.[0] + .[1]' all_courses.json "raw/${chunk}_index.json" > tmp.json && mv tmp.json all_courses.json
-            fi
+            # Extract each course as separate file
+            jq -c '.features[] | select(.properties.leisure == "golf_course" and .properties.name != null)' raw/all.geojson | while read -r course; do
+              osm_id=$(echo "$course" | jq -r '.id')
+              name=$(echo "$course" | jq -r '.properties.name')
+              
+              # Create safe filename
+              filename=$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
+              filename="${filename}-${osm_id}"
+              
+              # Get course bounds
+              bounds=$(echo "$course" | jq -c 'if .geometry.type == "Polygon" then
+                  { minLat: ([.geometry.coordinates[0][][1]] | min), maxLat: ([.geometry.coordinates[0][][1]] | max),
+                    minLon: ([.geometry.coordinates[0][][0]] | min), maxLon: ([.geometry.coordinates[0][][0]] | max) }
+                elif .geometry.type == "MultiPolygon" then
+                  { minLat: ([.geometry.coordinates[][][]][0] | map(.[1]) | min), maxLat: ([.geometry.coordinates[][][]][0] | map(.[1]) | max),
+                    minLon: ([.geometry.coordinates[][][]][0] | map(.[0]) | min), maxLon: ([.geometry.coordinates[][][]][0] | map(.[0]) | max) }
+                else
+                  { minLat: 0, maxLat: 0, minLon: 0, maxLon: 0 }
+                end')
+              
+              minLat=$(echo "$bounds" | jq -r '.minLat')
+              maxLat=$(echo "$bounds" | jq -r '.maxLat')
+              minLon=$(echo "$bounds" | jq -r '.minLon')
+              maxLon=$(echo "$bounds" | jq -r '.maxLon')
+              
+              # Skip if no valid bounds
+              if [[ "$minLat" == "0" || "$minLat" == "null" ]]; then
+                echo "  Skipping $name - no valid bounds"
+                continue
+              fi
+              
+              # Pad bounds slightly
+              minLat=$(echo "$minLat - 0.005" | bc)
+              maxLat=$(echo "$maxLat + 0.005" | bc)
+              minLon=$(echo "$minLon - 0.005" | bc)
+              maxLon=$(echo "$maxLon + 0.005" | bc)
+              
+              # Extract all features within course bounds (course + holes + geometry)
+              jq --argjson minLat "$minLat" --argjson maxLat "$maxLat" --argjson minLon "$minLon" --argjson maxLon "$maxLon" '
+                def in_bounds:
+                  if .geometry.type == "Point" then
+                    .geometry.coordinates[1] >= $minLat and .geometry.coordinates[1] <= $maxLat and
+                    .geometry.coordinates[0] >= $minLon and .geometry.coordinates[0] <= $maxLon
+                  elif .geometry.type == "LineString" then
+                    (.geometry.coordinates | map(.[1] >= $minLat and .[1] <= $maxLat and .[0] >= $minLon and .[0] <= $maxLon) | any)
+                  elif .geometry.type == "Polygon" then
+                    (.geometry.coordinates[0] | map(.[1] >= $minLat and .[1] <= $maxLat and .[0] >= $minLon and .[0] <= $maxLon) | any)
+                  elif .geometry.type == "MultiPolygon" then
+                    (.geometry.coordinates[0][0] | map(.[1] >= $minLat and .[1] <= $maxLat and .[0] >= $minLon and .[0] <= $maxLon) | any)
+                  else false end;
+                { type: "FeatureCollection", features: [.features[] | select(in_bounds)] }
+              ' raw/all.geojson > "raw/${filename}.geojson"
+              
+              # Compress
+              gzip -9 -c "raw/${filename}.geojson" > "courses/$continent/$country/$state/${filename}.geojson.gz"
+              rm "raw/${filename}.geojson"
+              
+              echo "  Created ${filename}.geojson.gz"
+            done
             
-            # Compress chunk
-            gzip -9 -c "raw/${chunk}.geojson" > "chunks/${chunk}.geojson.gz"
+            # Build state index
+            jq -c --arg state "$state" --arg country "$country" --arg continent "$continent" '[.features[] | select(.properties.leisure == "golf_course" and .properties.name != null) | {
+              name: .properties.name,
+              city: (.properties["addr:city"] // ""),
+              osmId: .id,
+              file: ((.properties.name | ascii_downcase | gsub("[^a-z0-9]"; "-") | gsub("--+"; "-") | gsub("^-"; "") | gsub("-$"; "")) + "-" + .id + ".geojson.gz"),
+              lat: (if .geometry.type == "Point" then .geometry.coordinates[1] 
+                    elif .geometry.type == "LineString" then (.geometry.coordinates | map(.[1]) | add / length)
+                    elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[1]) | add / length)
+                    elif .geometry.type == "MultiPolygon" then (.geometry.coordinates[0][0] | map(.[1]) | add / length)
+                    else 0 end),
+              lon: (if .geometry.type == "Point" then .geometry.coordinates[0]
+                    elif .geometry.type == "LineString" then (.geometry.coordinates | map(.[0]) | add / length)
+                    elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[0]) | add / length)
+                    elif .geometry.type == "MultiPolygon" then (.geometry.coordinates[0][0] | map(.[0]) | add / length)
+                    else 0 end)
+            }] | sort_by(.name)' raw/all.geojson > "courses/$continent/$country/$state/index.json"
             
-            echo "Chunk size: $(ls -lh chunks/${chunk}.geojson.gz | awk '{print $5}')"
+            echo "  State index: $(jq length "courses/$continent/$country/$state/index.json") courses"
             
-            # Cleanup to save disk space
-            rm -f raw/region.osm.pbf raw/golf.osm.pbf "raw/${chunk}.geojson" "raw/${chunk}_index.json"
+            # Cleanup
+            rm -f raw/region.osm.pbf raw/golf.osm.pbf raw/all.geojson
             
           done < regions.txt
-          
-          # Finalize index
-          jq -s '.[0] | sort_by(.name)' all_courses.json > index.json
-          echo "Total courses: $(jq length index.json)"
-          echo "Index size: $(ls -lh index.json | awk '{print $5}')"
 
-      - name: Commit index
+      - name: Build hierarchical indexes
+        run: |
+          # Country indexes
+          for country_dir in courses/*/*/; do
+            country=$(basename "$country_dir")
+            parent=$(dirname "$country_dir")
+            jq -s 'add | sort_by(.name)' "$country_dir"/*/index.json > "$country_dir/index.json" 2>/dev/null || echo "[]" > "$country_dir/index.json"
+            echo "Country index $country: $(jq length "$country_dir/index.json") courses"
+          done
+          
+          # Continent indexes
+          for continent_dir in courses/*/; do
+            continent=$(basename "$continent_dir")
+            jq -s 'add | sort_by(.name)' "$continent_dir"/*/index.json > "$continent_dir/index.json" 2>/dev/null || echo "[]" > "$continent_dir/index.json"
+            echo "Continent index $continent: $(jq length "$continent_dir/index.json") courses"
+          done
+          
+          # Root index
+          jq -s 'add | sort_by(.name)' courses/*/index.json > courses/index.json 2>/dev/null || echo "[]" > courses/index.json
+          echo "Root index: $(jq length courses/index.json) courses"
+
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.json
-          git diff --staged --quiet || git commit -m "Update index $(date +%Y-%m-%d)"
+          git add courses/
+          git diff --staged --quiet || git commit -m "Update golf courses $(date +%Y-%m-%d)"
           git push
-
-      - name: Create Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="v$(date +%Y%m%d)"
-          
-          # Delete existing release with same tag if exists
-          gh release delete "$TAG" --yes 2>/dev/null || true
-          git push --delete origin "$TAG" 2>/dev/null || true
-          
-          # Create new release
-          gh release create "$TAG" \
-            --title "Golf Courses $(date +%Y-%m-%d)" \
-            --notes "Extracted from OpenStreetMap via Geofabrik" \
-            chunks/*.geojson.gz
