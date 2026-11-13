@@ -2,7 +2,7 @@ name: Extract Golf Courses
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 0 * * 0'  # Weekly
   workflow_dispatch:
 
 permissions:
@@ -11,29 +11,192 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install osmium
-        run: sudo apt-get install -y osmium-tool
-
-      - name: Extract North America
+      - name: Install dependencies
         run: |
-          curl -L -o na.osm.pbf "https://download.geofabrik.de/north-america-latest.osm.pbf"
-          echo "Downloaded: $(ls -lh na.osm.pbf)"
-          osmium tags-filter na.osm.pbf nwr/leisure=golf_course nwr/golf=* -o na-golf.osm.pbf --verbose
-          echo "Filtered: $(ls -lh na-golf.osm.pbf)"
-          osmium export na-golf.osm.pbf -o golf-courses-na.geojson --verbose
-          echo "Final geojson size:"
-          ls -lh golf-courses-na.geojson
-          wc -l golf-courses-na.geojson
-          rm na.osm.pbf na-golf.osm.pbf
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool jq
 
-      - name: Commit
+      - name: Create directories
+        run: mkdir -p chunks raw
+
+      - name: Define regions
+        run: |
+          cat > regions.txt << 'EOF'
+          us/alabama
+          us/alaska
+          us/arizona
+          us/arkansas
+          us/california
+          us/colorado
+          us/connecticut
+          us/delaware
+          us/district-of-columbia
+          us/florida
+          us/georgia
+          us/hawaii
+          us/idaho
+          us/illinois
+          us/indiana
+          us/iowa
+          us/kansas
+          us/kentucky
+          us/louisiana
+          us/maine
+          us/maryland
+          us/massachusetts
+          us/michigan
+          us/minnesota
+          us/mississippi
+          us/missouri
+          us/montana
+          us/nebraska
+          us/nevada
+          us/new-hampshire
+          us/new-jersey
+          us/new-mexico
+          us/new-york
+          us/north-carolina
+          us/north-dakota
+          us/ohio
+          us/oklahoma
+          us/oregon
+          us/pennsylvania
+          us/puerto-rico
+          us/rhode-island
+          us/south-carolina
+          us/south-dakota
+          us/tennessee
+          us/texas
+          us/utah
+          us/vermont
+          us/virginia
+          us/washington
+          us/west-virginia
+          us/wisconsin
+          us/wyoming
+          canada/alberta
+          canada/british-columbia
+          canada/manitoba
+          canada/new-brunswick
+          canada/newfoundland-and-labrador
+          canada/northwest-territories
+          canada/nova-scotia
+          canada/nunavut
+          canada/ontario
+          canada/prince-edward-island
+          canada/quebec
+          canada/saskatchewan
+          canada/yukon
+          mexico
+          EOF
+
+      - name: Extract golf courses from each region
+        run: |
+          echo "[]" > all_courses.json
+          
+          while IFS= read -r region; do
+            region=$(echo "$region" | xargs)  # trim whitespace
+            [ -z "$region" ] && continue
+            
+            # Determine URL and chunk name
+            if [[ "$region" == "mexico" ]]; then
+              url="https://download.geofabrik.de/north-america/mexico-latest.osm.pbf"
+              chunk="mx-mexico"
+              country="MX"
+              state="Mexico"
+            elif [[ "$region" == us/* ]]; then
+              state_slug="${region#us/}"
+              url="https://download.geofabrik.de/north-america/us/${state_slug}-latest.osm.pbf"
+              chunk="us-${state_slug}"
+              country="US"
+              state=$(echo "$state_slug" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+            elif [[ "$region" == canada/* ]]; then
+              prov_slug="${region#canada/}"
+              url="https://download.geofabrik.de/north-america/canada/${prov_slug}-latest.osm.pbf"
+              chunk="ca-${prov_slug}"
+              country="CA"
+              state=$(echo "$prov_slug" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+            fi
+            
+            echo "=== Processing $chunk ==="
+            
+            # Download
+            curl -L -o raw/region.osm.pbf "$url" || { echo "Failed to download $region"; continue; }
+            
+            # Extract golf courses
+            osmium tags-filter raw/region.osm.pbf \
+              nwr/leisure=golf_course nwr/golf=* \
+              -o raw/golf.osm.pbf --overwrite
+            
+            # Export to GeoJSON
+            osmium export raw/golf.osm.pbf -o "raw/${chunk}.geojson" --overwrite
+            
+            # Extract course info for index (leisure=golf_course only, with name)
+            jq -c --arg chunk "$chunk" --arg country "$country" --arg state "$state" '
+              .features[]
+              | select(.properties.leisure == "golf_course" and .properties.name != null)
+              | {
+                  name: .properties.name,
+                  city: (.properties["addr:city"] // ""),
+                  state: $state,
+                  country: $country,
+                  chunk: $chunk,
+                  osmId: (.id // .properties["@id"] // "" | tostring | gsub("[^0-9]"; "") | tonumber),
+                  osmType: (if .geometry.type == "Point" then "node" elif .geometry.type == "Polygon" then "way" else "relation" end),
+                  lat: (if .geometry.type == "Point" then .geometry.coordinates[1] 
+                        elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[1]) | add / length)
+                        else (.geometry.coordinates[0][0] | map(.[1]) | add / length) end),
+                  lon: (if .geometry.type == "Point" then .geometry.coordinates[0]
+                        elif .geometry.type == "Polygon" then (.geometry.coordinates[0] | map(.[0]) | add / length)
+                        else (.geometry.coordinates[0][0] | map(.[0]) | add / length) end)
+                }
+            ' "raw/${chunk}.geojson" > "raw/${chunk}_index.json" 2>/dev/null || true
+            
+            # Append to all_courses
+            if [ -s "raw/${chunk}_index.json" ]; then
+              jq -s '.[0] + .[1]' all_courses.json "raw/${chunk}_index.json" > tmp.json && mv tmp.json all_courses.json
+            fi
+            
+            # Compress chunk
+            gzip -9 -c "raw/${chunk}.geojson" > "chunks/${chunk}.geojson.gz"
+            
+            echo "Chunk size: $(ls -lh chunks/${chunk}.geojson.gz | awk '{print $5}')"
+            
+            # Cleanup to save disk space
+            rm -f raw/region.osm.pbf raw/golf.osm.pbf "raw/${chunk}.geojson" "raw/${chunk}_index.json"
+            
+          done < regions.txt
+          
+          # Finalize index
+          jq -s '.[0] | sort_by(.name)' all_courses.json > index.json
+          echo "Total courses: $(jq length index.json)"
+          echo "Index size: $(ls -lh index.json | awk '{print $5}')"
+
+      - name: Commit index
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.geojson
-          git diff --staged --quiet || git commit -m "Update golf courses $(date +%Y-%m-%d)"
+          git add index.json
+          git diff --staged --quiet || git commit -m "Update index $(date +%Y-%m-%d)"
           git push
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(date +%Y%m%d)"
+          
+          # Delete existing release with same tag if exists
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push --delete origin "$TAG" 2>/dev/null || true
+          
+          # Create new release
+          gh release create "$TAG" \
+            --title "Golf Courses $(date +%Y-%m-%d)" \
+            --notes "Extracted from OpenStreetMap via Geofabrik" \
+            chunks/*.geojson.gz
