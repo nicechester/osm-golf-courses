@@ -126,23 +126,30 @@ jobs:
           # Export to GeoJSON
           osmium export golf.osm.pbf -o all.geojson --add-unique-id=type_id --overwrite
           
-          # Extract each course
-          jq -c '.features[] | select(.properties.leisure == "golf_course" and .properties.name != null)' all.geojson | while read -r course; do
+          # Extract each course (only Polygon/MultiPolygon)
+          jq -c '.features[] | select(.properties.leisure == "golf_course" and .properties.name != null and (.geometry.type == "Polygon" or .geometry.type == "MultiPolygon"))' all.geojson | while read -r course; do
             osm_id=$(echo "$course" | jq -r '.id')
             name=$(echo "$course" | jq -r '.properties.name')
             filename=$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
             filename="${filename}-${osm_id}"
+            geom_type=$(echo "$course" | jq -r '.geometry.type')
             
-            # Get bounds
-            bounds=$(echo "$course" | jq -c 'if .geometry.type == "Polygon" then
-                { minLat: ([.geometry.coordinates[0][][1]] | min), maxLat: ([.geometry.coordinates[0][][1]] | max),
-                  minLon: ([.geometry.coordinates[0][][0]] | min), maxLon: ([.geometry.coordinates[0][][0]] | max) }
-              elif .geometry.type == "MultiPolygon" then
-                { minLat: ([.geometry.coordinates[][][]] | flatten(1) | map(.[1]) | min),
-                  maxLat: ([.geometry.coordinates[][][]] | flatten(1) | map(.[1]) | max),
-                  minLon: ([.geometry.coordinates[][][]] | flatten(1) | map(.[0]) | min),
-                  maxLon: ([.geometry.coordinates[][][]] | flatten(1) | map(.[0]) | max) }
-              else { minLat: 0, maxLat: 0, minLon: 0, maxLon: 0 } end')
+            # Get bounds based on geometry type
+            if [[ "$geom_type" == "Polygon" ]]; then
+              bounds=$(echo "$course" | jq -c '{
+                minLat: ([.geometry.coordinates[0][] | .[1]] | min),
+                maxLat: ([.geometry.coordinates[0][] | .[1]] | max),
+                minLon: ([.geometry.coordinates[0][] | .[0]] | min),
+                maxLon: ([.geometry.coordinates[0][] | .[0]] | max)
+              }')
+            else
+              bounds=$(echo "$course" | jq -c '{
+                minLat: ([.geometry.coordinates[][] | .[] | .[1]] | min),
+                maxLat: ([.geometry.coordinates[][] | .[] | .[1]] | max),
+                minLon: ([.geometry.coordinates[][] | .[] | .[0]] | min),
+                maxLon: ([.geometry.coordinates[][] | .[] | .[0]] | max)
+              }')
+            fi
             
             minLat=$(echo "$bounds" | jq -r '.minLat')
             maxLat=$(echo "$bounds" | jq -r '.maxLat')
@@ -176,8 +183,8 @@ jobs:
             echo "  ${filename}.geojson.gz ($(ls -lh "courses/$continent/$country/$state/${filename}.geojson.gz" | awk '{print $5}'))"
           done
           
-          # Build state index
-          jq -c '[.features[] | select(.properties.leisure == "golf_course" and .properties.name != null) | {
+          # Build state index (only Polygon/MultiPolygon)
+          jq -c '[.features[] | select(.properties.leisure == "golf_course" and .properties.name != null and (.geometry.type == "Polygon" or .geometry.type == "MultiPolygon")) | {
             name: .properties.name,
             city: (.properties["addr:city"] // ""),
             osmId: .id,
