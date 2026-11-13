@@ -1,124 +1,127 @@
 # OSM Golf Courses
 
-Golf course data extracted from OpenStreetMap for mobile app integration. Per-course GeoJSON files with detailed geometry (holes, fairways, greens, bunkers).
+Pre-extracted golf course data from OpenStreetMap for mobile app integration.
 
 ## Data Structure
 
-### Release Assets (Course Files)
-
-Each golf course is a separate gzipped GeoJSON file in GitHub Releases:
+Golf course GeoJSON files are stored in [GitHub Releases](https://github.com/nicechester/osm-golf-courses/releases), organized by region:
 
 ```
-https://github.com/nicechester/osm-golf-courses/releases/latest/download/{filename}
+north-america_us_california.geojson.gz    # All California courses
+north-america_us_texas.geojson.gz         # All Texas courses
+north-america_ca_ontario.geojson.gz       # All Ontario courses
+north-america_mx_mexico.geojson.gz        # All Mexico courses
 ```
 
-**Filename format:** `{continent}_{country}_{state}_{course-name}-{osm-id}.geojson.gz`
+## API Endpoints
 
-Example: `north-america_us_hawaii_ala-wai-golf-course-a83995508.geojson.gz`
+| Resource | URL |
+|----------|-----|
+| Release (latest) | `https://github.com/nicechester/osm-golf-courses/releases/latest` |
+| Region file | `https://github.com/nicechester/osm-golf-courses/releases/latest/download/{region}.geojson.gz` |
+| Master index | `https://raw.githubusercontent.com/nicechester/osm-golf-courses/main/indexes/index.json` |
 
-**File size:** ~50-300KB per course (gzipped)
+## GeoJSON Content
 
-### Index Files (in repo)
-
-Hierarchical JSON indexes for searching/browsing:
-
-```
-indexes/
-├── index.json                              # All courses (~15,000+)
-├── north-america/
-│   ├── index.json                          # All North America
-│   ├── us/
-│   │   ├── index.json                      # All US courses
-│   │   ├── california/index.json           # California courses
-│   │   ├── hawaii/index.json               # Hawaii courses
-│   │   └── ...
-│   ├── ca/
-│   │   ├── index.json                      # All Canada courses
-│   │   ├── ontario/index.json
-│   │   └── ...
-│   └── mx/
-│       └── mexico/index.json
-```
-
-**Index entry format:**
-```json
-{
-  "name": "Ala Wai Golf Course",
-  "city": "Honolulu",
-  "osmId": "a83995508",
-  "file": "north-america_us_hawaii_ala-wai-golf-course-a83995508.geojson.gz",
-  "lat": 21.279420,
-  "lon": -157.819321
-}
-```
-
-### GeoJSON Content
-
-Each course file is a FeatureCollection containing:
+Each region file contains all golf features for that area:
 
 | Feature Type | OSM Tag | Description |
 |--------------|---------|-------------|
 | Course boundary | `leisure=golf_course` | Overall course polygon |
-| Holes | `golf=hole` | Hole centerlines (LineString) |
-| Fairways | `golf=fairway` | Fairway polygons |
-| Greens | `golf=green` | Green polygons |
-| Bunkers | `golf=bunker` | Sand trap polygons |
-| Rough | `golf=rough` | Rough area polygons |
-| Tee boxes | `golf=tee` | Tee box polygons |
-
-**OSM ID format:** `w123456` (way), `r123456` (relation), `a123456` (area)
+| Holes | `golf=hole` | Individual hole polygons |
+| Fairways | `golf=fairway` | Fairway areas |
+| Greens | `golf=green` | Putting greens |
+| Bunkers | `golf=bunker` | Sand traps |
+| Rough | `golf=rough` | Rough areas |
 
 ## Mobile App Integration
+
+### Index Format
+
+The master index (`indexes/index.json`) contains all courses:
+
+```json
+[
+  {
+    "name": "Pebble Beach Golf Links",
+    "city": "Pebble Beach",
+    "osmId": "w123456",
+    "file": "north-america_us_california.geojson.gz",
+    "lat": 36.5725,
+    "lon": -121.9486
+  }
+]
+```
 
 ### iOS (Swift)
 
 ```swift
-// 1. Fetch state index
-let indexURL = URL(string: "https://raw.githubusercontent.com/nicechester/osm-golf-courses/main/indexes/north-america/us/hawaii/index.json")!
-let courses: [Course] = try await URLSession.shared.decode(from: indexURL)
+import Foundation
+import Compression
 
-// 2. Find nearby courses
-let nearby = courses.filter { course in
-    let distance = CLLocation(latitude: course.lat, longitude: course.lon)
-        .distance(from: userLocation)
-    return distance < 50_000 // 50km
+class GolfCourseService {
+    static let shared = GolfCourseService()
+    private let cache = NSCache<NSString, NSData>()
+    private let baseURL = "https://github.com/nicechester/osm-golf-courses/releases/latest/download/"
+    
+    func loadRegion(_ filename: String) async throws -> Data {
+        // Check cache
+        if let cached = cache.object(forKey: filename as NSString) {
+            return cached as Data
+        }
+        
+        // Download
+        let url = URL(string: baseURL + filename)!
+        let (data, _) = try await URLSession.shared.data(from: url)
+        
+        // Decompress gzip
+        let decompressed = try decompress(data)
+        
+        // Cache for 1 day
+        cache.setObject(decompressed as NSData, forKey: filename as NSString)
+        
+        return decompressed
+    }
+    
+    private func decompress(_ data: Data) throws -> Data {
+        // Skip gzip header (10 bytes) and decompress
+        let decompressed = try (data.dropFirst(10) as NSData)
+            .decompressed(using: .zlib)
+        return decompressed as Data
+    }
 }
-
-// 3. Download course detail when selected
-let courseURL = URL(string: "https://github.com/nicechester/osm-golf-courses/releases/latest/download/\(course.file)")!
-let (data, _) = try await URLSession.shared.data(from: courseURL)
-let decompressed = try (data as NSData).decompressed(using: .gzip)
-let geoJSON = try JSONDecoder().decode(FeatureCollection.self, from: decompressed)
 ```
 
 ### Android (Kotlin)
 
 ```kotlin
-// 1. Fetch state index
-val indexUrl = "https://raw.githubusercontent.com/nicechester/osm-golf-courses/main/indexes/north-america/us/hawaii/index.json"
-val courses: List<Course> = retrofit.create(GolfApi::class.java).getIndex(indexUrl)
+import java.net.URL
+import java.util.zip.GZIPInputStream
 
-// 2. Find nearby courses
-val nearby = courses.filter { course ->
-    val results = FloatArray(1)
-    Location.distanceBetween(userLat, userLon, course.lat, course.lon, results)
-    results[0] < 50_000 // 50km
+class GolfCourseRepository {
+    private val cache = mutableMapOf<String, String>()
+    private val baseUrl = "https://github.com/nicechester/osm-golf-courses/releases/latest/download/"
+    
+    suspend fun loadRegion(filename: String): String {
+        cache[filename]?.let { return it }
+        
+        val geojson = withContext(Dispatchers.IO) {
+            URL(baseUrl + filename).openStream().use { input ->
+                GZIPInputStream(input).bufferedReader().readText()
+            }
+        }
+        
+        cache[filename] = geojson
+        return geojson
+    }
 }
-
-// 3. Download course detail when selected
-val courseUrl = "https://github.com/nicechester/osm-golf-courses/releases/latest/download/${course.file}"
-val response = okHttpClient.newCall(Request.Builder().url(courseUrl).build()).execute()
-val geoJson = GZIPInputStream(response.body?.byteStream()).bufferedReader().readText()
 ```
 
-## Caching Strategy
+### Caching Strategy
 
-Recommended approach for mobile apps:
-
-1. **Index caching:** Cache state/country indexes locally, refresh weekly
-2. **Course caching:** Cache downloaded course files indefinitely (use OSM ID as cache key)
-3. **Lazy loading:** Only download course detail when user selects it
-4. **Prefetch:** Optionally prefetch nearby courses in background
+- Cache region files with 1 day TTL
+- Use `file` field from index to determine which region to download
+- Find nearest course using lat/lon from index, then load its region file
 
 ## Coverage
 
@@ -126,21 +129,11 @@ Recommended approach for mobile apps:
 |--------|------------------|
 | US | 50 states + DC + Puerto Rico |
 | Canada | 13 provinces/territories |
-| Mexico | Nationwide |
+| Mexico | Entire country |
 
 ## Update Schedule
 
-- **Frequency:** Weekly (Sunday 00:00 UTC)
-- **Source:** [Geofabrik](https://download.geofabrik.de/) OSM extracts
-- **Workflow:** GitHub Actions ([extract-golf.yml](.github/workflows/extract-golf.yml))
-
-## API Endpoints
-
-| Resource | URL |
-|----------|-----|
-| Root index | `https://raw.githubusercontent.com/nicechester/osm-golf-courses/main/indexes/index.json` |
-| State index | `https://raw.githubusercontent.com/nicechester/osm-golf-courses/main/indexes/north-america/us/{state}/index.json` |
-| Course file | `https://github.com/nicechester/osm-golf-courses/releases/latest/download/{filename}` |
+Data is refreshed weekly (Sunday 00:00 UTC) from [Geofabrik](https://download.geofabrik.de/) OSM mirrors.
 
 ## License
 
