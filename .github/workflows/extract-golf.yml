@@ -90,6 +90,8 @@ jobs:
         run: sudo apt-get install -y osmium-tool jq bc
 
       - name: Extract courses for ${{ matrix.region }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           region="${{ matrix.region }}"
           
@@ -111,6 +113,14 @@ jobs:
             continent="north-america"
             country="ca"
             state="$prov_slug"
+          fi
+          
+          # Check if already in today's release
+          TAG="v$(date +%Y%m%d)"
+          file_prefix="${continent}_${country}_${state}_"
+          if gh release view "$TAG" --json assets -q ".assets[].name" 2>/dev/null | grep -q "^${file_prefix}"; then
+            echo "Region $region already in release $TAG, skipping"
+            exit 0
           fi
           
           mkdir -p "courses/$continent/$country/$state"
@@ -243,10 +253,14 @@ jobs:
         continue-on-error: true
 
       - name: Process failed regions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Cooldown - wait for Geofabrik rate limit to reset
           echo "Waiting 60s cooldown before retrying failed regions..."
           sleep 60
+          
+          TAG="v$(date +%Y%m%d)"
           
           # All regions
           cat > all_regions.txt << 'EOF'
@@ -355,6 +369,13 @@ jobs:
               continent="north-america"
               country="ca"
               state="$prov_slug"
+            fi
+            
+            # Check if already in today's release
+            file_prefix="${continent}_${country}_${state}_"
+            if gh release view "$TAG" --json assets -q ".assets[].name" 2>/dev/null | grep -q "^${file_prefix}"; then
+              echo "Region $region already in release $TAG, skipping"
+              continue
             fi
             
             mkdir -p "courses/$continent/$country/$state"
