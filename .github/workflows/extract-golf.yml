@@ -166,17 +166,14 @@ jobs:
             
             # Extract features in bounds
             jq --argjson minLat "$minLat" --argjson maxLat "$maxLat" --argjson minLon "$minLon" --argjson maxLon "$maxLon" '
+              def get_coords:
+                if .geometry.type == "Point" then [.geometry.coordinates]
+                elif .geometry.type == "LineString" then .geometry.coordinates
+                elif .geometry.type == "Polygon" then .geometry.coordinates | flatten(1)
+                elif .geometry.type == "MultiPolygon" then .geometry.coordinates | flatten(2)
+                else [] end;
               def in_bounds:
-                if .geometry.type == "Point" then
-                  .geometry.coordinates[1] >= $minLat and .geometry.coordinates[1] <= $maxLat and
-                  .geometry.coordinates[0] >= $minLon and .geometry.coordinates[0] <= $maxLon
-                elif .geometry.type == "LineString" then
-                  (.geometry.coordinates | map(.[1] >= $minLat and .[1] <= $maxLat and .[0] >= $minLon and .[0] <= $maxLon) | any)
-                elif .geometry.type == "Polygon" then
-                  (.geometry.coordinates[0] | map(.[1] >= $minLat and .[1] <= $maxLat and .[0] >= $minLon and .[0] <= $maxLon) | any)
-                elif .geometry.type == "MultiPolygon" then
-                  ([.geometry.coordinates[][][]] | flatten(1) | map(.[1] >= $minLat and .[1] <= $maxLat and .[0] >= $minLon and .[0] <= $maxLon) | any)
-                else false end;
+                (get_coords | map(.[1] >= $minLat and .[1] <= $maxLat and .[0] >= $minLon and .[0] <= $maxLon) | any) // false;
               { type: "FeatureCollection", features: [.features[] | select(in_bounds)] }
             ' all.geojson | gzip -9 > "courses/$continent/$country/$state/${filename}.geojson.gz"
             
