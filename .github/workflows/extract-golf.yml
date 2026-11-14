@@ -154,8 +154,8 @@ jobs:
             mv indexes/index_new.json indexes/index.json
           done
           
-          # Sort index
-          jq 'sort_by(.name)' indexes/index.json > indexes/index_sorted.json
+          # Filter out entries with null coordinates and sort
+          jq '[.[] | select(.lat != null and .lon != null)] | sort_by(.name)' indexes/index.json > indexes/index_sorted.json
           mv indexes/index_sorted.json indexes/index.json
           
           echo "Total courses: $(jq length indexes/index.json)"
