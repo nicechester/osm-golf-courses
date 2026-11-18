@@ -126,37 +126,63 @@ if [[ "$OUTLINE_COUNT" -gt 1 ]]; then
   echo ""
   echo "=== Hole-to-Outline Association (proposed fix) ==="
   
-  # Get centroid of requested outline
-  REQ_CENTROID=$(jq -r --arg id "$OSM_ID" '.[] | select(.id == $id) |
-    def all_coords:
-      if .geometry.type == "Polygon" then [.geometry.coordinates[][] ]
-      elif .geometry.type == "MultiPolygon" then [.geometry.coordinates[][][] ]
-      else [] end;
-    (all_coords | map(.[1]) | add / length) as $lat |
-    (all_coords | map(.[0]) | add / length) as $lon |
-    "\($lat)|\($lon)"' /tmp/all_outlines.json)
-  IFS='|' read -r REQ_LAT REQ_LON <<< "$REQ_CENTROID"
-  echo "Requested outline centroid: $REQ_LAT, $REQ_LON"
-  
-  # For each hole, find nearest outline by centroid distance
-  # Associate hole with the outline whose centroid is closest to hole start point
+  # Use point-in-polygon test with fallback to nearest centroid
+  # For each hole, check if start point is inside any outline polygon
+  # If inside requested outline -> keep
+  # If inside another outline -> discard
+  # If not inside any -> use nearest centroid
   FILTERED_HOLES=$(echo "$HOLES" | jq --argjson outlines "$(cat /tmp/all_outlines.json)" --arg reqId "$OSM_ID" '
+    # Ray casting algorithm for point-in-polygon
+    def point_in_polygon($pt; $poly):
+      ($pt[0]) as $x | ($pt[1]) as $y |
+      reduce range(0; $poly | length) as $i (false;
+        ($poly[$i]) as $p1 |
+        ($poly[if $i == 0 then ($poly | length - 1) else $i - 1 end]) as $p2 |
+        if (($p1[1] > $y) != ($p2[1] > $y)) and
+           ($x < ($p2[0] - $p1[0]) * ($y - $p1[1]) / ($p2[1] - $p1[1]) + $p1[0])
+        then not else . end
+      );
+    
+    # Get all polygon rings from an outline
+    def get_rings:
+      if .geometry.type == "Polygon" then [.geometry.coordinates[0]]
+      elif .geometry.type == "MultiPolygon" then [.geometry.coordinates[][0]]
+      else [] end;
+    
+    # Check if point is inside any ring of an outline
+    def point_in_outline($pt; $outline):
+      ($outline | get_rings) as $rings |
+      ($rings | map(point_in_polygon($pt; .)) | any);
+    
+    # Centroid of outline
     def outline_centroid:
       if .geometry.type == "Polygon" then
         (.geometry.coordinates[0] | map(.[1]) | add / length) as $lat |
         (.geometry.coordinates[0] | map(.[0]) | add / length) as $lon |
-        {lat: $lat, lon: $lon}
+        [$lon, $lat]
       elif .geometry.type == "MultiPolygon" then
         ([.geometry.coordinates[][][] | .[1]] | add / length) as $lat |
         ([.geometry.coordinates[][][] | .[0]] | add / length) as $lon |
-        {lat: $lat, lon: $lon}
-      else {lat: 0, lon: 0} end;
-    def dist($p1; $p2): (($p1.lat - $p2.lat) | . * .) + (($p1.lon - $p2.lon) | . * .) | sqrt;
-    ($outlines | map({id: .id, centroid: outline_centroid})) as $centroids |
+        [$lon, $lat]
+      else [0, 0] end;
+    
+    def dist($p1; $p2): (($p1[0] - $p2[0]) * ($p1[0] - $p2[0])) + (($p1[1] - $p2[1]) * ($p1[1] - $p2[1])) | sqrt;
+    
+    # Build outline info with centroids
+    ($outlines | map({id: .id, outline: ., centroid: outline_centroid})) as $outlineInfo |
+    
     [.[] | . as $hole |
-      ($hole.geometry.coordinates[0] | {lat: .[1], lon: .[0]}) as $start |
-      ($centroids | map({id: .id, d: dist(.centroid; $start)}) | min_by(.d)) as $nearest |
-      select($nearest.id == $reqId)
+      ($hole.geometry.coordinates[0]) as $start |
+      
+      # First try point-in-polygon for each outline
+      ($outlineInfo | map(select(point_in_outline($start; .outline))) | .[0].id) as $containingId |
+      
+      # If inside an outline, use that; otherwise find nearest centroid
+      (if $containingId then $containingId
+       else ($outlineInfo | map({id: .id, d: dist(.centroid; $start)}) | min_by(.d).id)
+       end) as $assignedId |
+      
+      select($assignedId == $reqId)
     ]')
   
   FILTERED_COUNT=$(echo "$FILTERED_HOLES" | jq 'length')
